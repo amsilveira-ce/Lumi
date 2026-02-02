@@ -1,16 +1,43 @@
 # lumi
 
-A new Flutter project.
+A Flutter application featuring waveform visualization and audio capabilities.
 
 ## Getting Started
 
-This project is a starting point for a Flutter application.
+### Prerequisites
 
-A few resources to get you started if this is your first Flutter project:
+Ensure you have Flutter installed. If not, follow the [Flutter installation guide](https://docs.flutter.dev/get-started/install).
 
-- [Lab: Write your first Flutter app](https://docs.flutter.dev/get-started/codelab)
-- [Cookbook: Useful Flutter samples](https://docs.flutter.dev/cookbook)
+### Project Setup
 
-For help getting started with Flutter development, view the
-[online documentation](https://docs.flutter.dev/), which offers tutorials,
-samples, guidance on mobile development, and a full API reference.
+1. **Install dependencies:**
+   ```bash
+   flutter pub get
+   ```
+
+2. **Run the application:**
+   ```bash
+   flutter run
+   ```
+
+3. **Build for release:**
+   ```bash
+   flutter build apk      # Android
+   flutter build ios      # iOS
+   flutter build web      # Web
+   ```
+
+### Project Structure
+
+- `lib/main.dart` - Application entry point
+- `lib/home_screen.dart` - Home screen UI
+- `lib/services/` - Service classes for app functionality
+- `assets/images/` - Image assets
+- `pubspec.yaml` - Project dependencies and configuration
+
+### Key Dependencies
+
+- `waveform_flutter: ^1.2.0` - Waveform visualization
+- `cupertino_icons: ^1.0.8` - iOS-style icons
+
+For more information on Flutter development, visit the [official documentation](https://docs.flutter.dev/).
