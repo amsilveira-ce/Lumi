@@ -30,8 +30,13 @@ environment:
 dependencies:
   flutter:
     sdk: flutter
-  
+
   waveform_flutter: ^1.2.0
+  google_generative_ai: ^0.4.0
+  flutter_dotenv: ^5.1.0
+  http: ^1.2.0
+  audioplayers: ^5.2.1
+  path_provider: ^2.1.2
 
 
 
@@ -61,6 +66,7 @@ flutter:
   assets:
     # individual assets must be indented by exactly 2 spaces under assets
     - assets/images/
+    - .env
 
   # To add assets to your application, add an assets section, like this:
   # assets:

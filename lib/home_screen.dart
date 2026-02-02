@@ -3,6 +3,7 @@ import 'dart:math';
 import 'dart:ui';
 import 'package:flutter/material.dart';
 import 'package:waveform_flutter/waveform_flutter.dart';
+import 'services/gemini_tts_service.dart';
 
 class CloseByHome extends StatefulWidget {
   const CloseByHome({super.key});
@@ -13,9 +14,13 @@ class CloseByHome extends StatefulWidget {
 
 class _CloseByHomeState extends State<CloseByHome> with TickerProviderStateMixin {
   bool isListening = false;
-  
+
   // FIX: Nullable controller to prevent LateInitializationError
   AnimationController? _pulseController;
+
+  // TTS Service
+  final GeminiTTSService _ttsService = GeminiTTSService();
+  bool _isSpeaking = false;
 
   @override
   void initState() {
@@ -33,7 +38,36 @@ class _CloseByHomeState extends State<CloseByHome> with TickerProviderStateMixin
   void dispose() {
     // FIX: Check for null before disposing to prevent errors
     _pulseController?.dispose();
+    _ttsService.dispose();
     super.dispose();
+  }
+
+  /// Speak text using humanized TTS
+  Future<void> _speakText(String text) async {
+    setState(() => _isSpeaking = true);
+    try {
+      await _ttsService.speak(text);
+    } catch (e) {
+      print('Error speaking: $e');
+      // Show error to user
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text('Erro ao reproduzir áudio: $e'),
+            backgroundColor: Colors.red,
+          ),
+        );
+      }
+    } finally {
+      if (mounted) {
+        setState(() => _isSpeaking = false);
+      }
+    }
+  }
+
+  /// Speak the current dialogue
+  void _speakDialogue() {
+    _speakText('Encontrei aquelas fotos do Leo. Vamos ligar para ele agora?');
   }
 
   // Helper to create a stream of amplitude data for the waveform
@@ -158,7 +192,7 @@ class _CloseByHomeState extends State<CloseByHome> with TickerProviderStateMixin
       child: Column(
         children: [
           Text(
-            "\"I found those photos of Leo.\"",
+            "\"Encontrei aquelas fotos do Leo.\"",
             textAlign: TextAlign.center,
             style: const TextStyle(
               color: Colors.white70,
@@ -167,15 +201,45 @@ class _CloseByHomeState extends State<CloseByHome> with TickerProviderStateMixin
             ),
           ),
           const SizedBox(height: 12),
-          const Text(
-            "Shall we call him now?",
-            textAlign: TextAlign.center,
-            style: TextStyle(
-              color: Colors.white,
-              fontSize: 32,
-              fontWeight: FontWeight.w500,
-              height: 1.2,
-            ),
+          Row(
+            mainAxisAlignment: MainAxisAlignment.center,
+            children: [
+              Flexible(
+                child: const Text(
+                  "Vamos ligar para ele agora?",
+                  textAlign: TextAlign.center,
+                  style: TextStyle(
+                    color: Colors.white,
+                    fontSize: 32,
+                    fontWeight: FontWeight.w500,
+                    height: 1.2,
+                  ),
+                ),
+              ),
+              const SizedBox(width: 16),
+              GestureDetector(
+                onTap: _isSpeaking ? null : _speakDialogue,
+                child: Container(
+                  padding: const EdgeInsets.all(12),
+                  decoration: BoxDecoration(
+                    color: _isSpeaking ? Colors.blueAccent : Colors.white24,
+                    shape: BoxShape.circle,
+                    boxShadow: _isSpeaking ? [
+                      BoxShadow(
+                        color: Colors.blueAccent.withOpacity(0.5),
+                        blurRadius: 15,
+                        spreadRadius: 2,
+                      )
+                    ] : [],
+                  ),
+                  child: Icon(
+                    _isSpeaking ? Icons.volume_up : Icons.volume_up_outlined,
+                    color: Colors.white,
+                    size: 28,
+                  ),
+                ),
+              ),
+            ],
           ),
         ],
       ),
@@ -188,14 +252,14 @@ class _CloseByHomeState extends State<CloseByHome> with TickerProviderStateMixin
       mainAxisAlignment: MainAxisAlignment.center,
       children: [
         _buildActionButton(
-          label: "No, later", 
-          icon: Icons.close, 
+          label: "Não, depois",
+          icon: Icons.close,
           color: Colors.white24
         ),
         const SizedBox(width: 20),
         _buildActionButton(
-          label: "Yes, Call", 
-          icon: Icons.videocam_rounded, 
+          label: "Sim, Ligar",
+          icon: Icons.videocam_rounded,
           color: const Color(0xFF4CAF50), // Green for positive action
           isPrimary: true
         ),
@@ -204,28 +268,38 @@ class _CloseByHomeState extends State<CloseByHome> with TickerProviderStateMixin
   }
 
   Widget _buildActionButton({required String label, required IconData icon, required Color color, bool isPrimary = false}) {
-    return Container(
-      padding: const EdgeInsets.symmetric(horizontal: 24, vertical: 16),
-      decoration: BoxDecoration(
-        color: color,
-        borderRadius: BorderRadius.circular(30),
-        boxShadow: isPrimary ? [
-           BoxShadow(color: color.withOpacity(0.4), blurRadius: 12, offset: const Offset(0, 4))
-        ] : [],
-      ),
-      child: Row(
-        children: [
-          Icon(icon, color: Colors.white, size: 28),
-          const SizedBox(width: 12),
-          Text(
-            label,
-            style: const TextStyle(
-              color: Colors.white,
-              fontSize: 18,
-              fontWeight: FontWeight.bold,
+    return GestureDetector(
+      onTap: () {
+        // Handle button actions
+        if (label == "Sim, Ligar") {
+          _speakText("Ligando para o Leo agora.");
+        } else if (label == "Não, depois") {
+          _speakText("Tudo bem, vou lembrar você mais tarde.");
+        }
+      },
+      child: Container(
+        padding: const EdgeInsets.symmetric(horizontal: 24, vertical: 16),
+        decoration: BoxDecoration(
+          color: color,
+          borderRadius: BorderRadius.circular(30),
+          boxShadow: isPrimary ? [
+             BoxShadow(color: color.withOpacity(0.4), blurRadius: 12, offset: const Offset(0, 4))
+          ] : [],
+        ),
+        child: Row(
+          children: [
+            Icon(icon, color: Colors.white, size: 28),
+            const SizedBox(width: 12),
+            Text(
+              label,
+              style: const TextStyle(
+                color: Colors.white,
+                fontSize: 18,
+                fontWeight: FontWeight.bold,
+              ),
             ),
-          ),
-        ],
+          ],
+        ),
       ),
     );
   }
