@@ -18,7 +18,7 @@ class GeminiTTSService {
   bool _isPlaying = false;
 
   /// Vozes disponíveis no Gemini TTS
-  static const String _defaultVoice = 'Puck';
+  static const String _defaultVoice = 'Zephyr';
 
   static const List<String> availableVoices = [
     'Puck',     // Voz natural e amigável
@@ -56,7 +56,7 @@ class GeminiTTSService {
           {
             'role': 'user',
             'parts': [
-              {'text': text}
+              {'text': 'Fale o seguinte texto em português brasileiro com tom natural e amigável:\n\n$text'}
             ]
           }
         ],

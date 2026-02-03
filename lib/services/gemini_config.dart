@@ -16,7 +16,7 @@ class GeminiConfig {
 
     // Initialize the Gemini model for text generation
     _model = GenerativeModel(
-      model: 'gemini-2.0-flash-exp',
+      model: 'gemini-2.5-flash',
       apiKey: _apiKey!,
     );
   }
