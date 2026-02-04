@@ -1,8 +1,18 @@
 import 'package:flutter/material.dart';
-// 1. Add this import (assuming your file is named home_screen.dart)
-import 'home_screen.dart'; 
+import 'home_screen.dart';
+import 'services/gemini_config.dart';
 
-void main() {
+void main() async {
+  WidgetsFlutterBinding.ensureInitialized();
+
+  // Initialize Gemini API configuration
+  try {
+    await GeminiConfig.initialize();
+    print('Gemini API initialized successfully');
+  } catch (e) {
+    print('Error initializing Gemini API: $e');
+  }
+
   runApp(const CloseByApp());
 }
 

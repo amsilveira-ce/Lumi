@@ -5,8 +5,10 @@
 import FlutterMacOS
 import Foundation
 
-import speech_to_text_macos
+import audioplayers_darwin
+import record_darwin
 
 func RegisterGeneratedPlugins(registry: FlutterPluginRegistry) {
-  SpeechToTextMacosPlugin.register(with: registry.registrar(forPlugin: "SpeechToTextMacosPlugin"))
+  AudioplayersDarwinPlugin.register(with: registry.registrar(forPlugin: "AudioplayersDarwinPlugin"))
+  RecordPlugin.register(with: registry.registrar(forPlugin: "RecordPlugin"))
 }
