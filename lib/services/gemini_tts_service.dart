@@ -299,14 +299,19 @@ class GeminiTTSService {
       await _audioPlayer.play(DeviceFileSource(tempFile.path));
 
       // Listen for completion and cleanup
-      _audioPlayer.onPlayerComplete.listen((_) {
+      _audioPlayer.onPlayerComplete.listen((_) async {
         _isPlaying = false;
         LogUtils.logStateChange('playing', 'complete', tag: 'TTS');
         _logger.debug('Native audio playback completed');
         
-        tempFile.delete().catchError((e) {
+        try {
+          await Future.delayed(const Duration(microseconds: 300));
+          await tempFile.delete();
+          _logger.debug("Temp audio file deleted...");
+        }catch (e){
           _logger.warning('Failed to delete temp file', error: e);
-        });
+        }
+       
       });
 
     } catch (e, stackTrace) {
