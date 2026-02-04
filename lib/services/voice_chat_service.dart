@@ -3,179 +3,345 @@ import 'package:google_generative_ai/google_generative_ai.dart';
 import 'gemini_config.dart';
 import 'gemini_stt_service.dart';
 import 'gemini_tts_service.dart';
+import '../utils/constants.dart';
+import '../utils/logger.dart';
 
-/// Serviço de conversação por voz com IA
+/// Voice conversation service integrating STT + LLM + TTS
 ///
-/// Integra STT (Speech-to-Text) + LLM + TTS (Text-to-Speech)
-/// para criar uma experiência completa de conversação por voz
+/// This service orchestrates the complete voice interaction pipeline:
+/// 1. Speech-to-Text (STT) - Convert audio to text
+/// 2. LLM Processing - Generate AI response
+/// 3. Text-to-Speech (TTS) - Convert response to audio
+///
+/// Maintains conversation history for context-aware responses.
 class VoiceChatService {
+  // === Logger ===
+  final _logger = ServiceLogger('VoiceChat');
+
+  // === Services ===
   final GeminiSTTService _sttService = GeminiSTTService();
   final GeminiTTSService _ttsService = GeminiTTSService();
 
-  // Histórico de conversação
+  // === State ===
   final List<Content> _conversationHistory = [];
-
-  // Estado
   bool _isProcessing = false;
   bool _isSpeaking = false;
   String? _lastUserMessage;
   String? _lastAIResponse;
 
-  /// Getter para verificar se está processando
+  // === Getters ===
   bool get isProcessing => _isProcessing;
-
-  /// Getter para verificar se está falando
   bool get isSpeaking => _isSpeaking;
-
-  /// Getter para última mensagem do usuário
   String? get lastUserMessage => _lastUserMessage;
-
-  /// Getter para última resposta da IA
   String? get lastAIResponse => _lastAIResponse;
-
-  /// Getter para histórico
   List<Content> get conversationHistory => List.unmodifiable(_conversationHistory);
 
-  /// Processa áudio do usuário e retorna resposta falada
+  /// Process voice input through complete pipeline
   ///
-  /// Fluxo: Áudio → STT → LLM → TTS → Áudio
-  Future<String> processVoiceInput(Uint8List audioBytes, {String mimeType = 'audio/wav'}) async {
+  /// Flow: Audio bytes → STT → LLM → TTS → Audio playback
+  ///
+  /// [audioBytes] - Raw audio data from microphone
+  /// [mimeType] - Audio format (default: 'audio/wav')
+  ///
+  /// Returns: AI response text
+  /// Throws: Exception if any step fails
+  Future<String> processVoiceInput(
+    Uint8List audioBytes, {
+    String mimeType = 'audio/wav',
+  }) async {
     if (_isProcessing) {
+      _logger.warning('Already processing a message - ignoring new request');
       throw Exception('Already processing a message');
     }
 
+    LogUtils.logVoiceFlowStart('Voice Input Processing');
+    final timer = PerformanceTimer('Full Voice Pipeline', logger: _logger);
+
     _isProcessing = true;
+    LogUtils.logStateChange('idle', 'processing', tag: 'VoiceChat');
 
     try {
-      // 1. STT: Converter áudio em texto
-      print('🎤 Step 1: Transcribing audio...');
-      final userText = await _sttService.transcribe(audioBytes, mimeType: mimeType);
-      _lastUserMessage = userText;
-      print('📝 User said: $userText');
+      // Log audio input details
+      LogUtils.logAudioInfo(
+        bytes: audioBytes.length,
+        format: mimeType,
+      );
 
-      // 2. LLM: Gerar resposta da IA
-      print('🤖 Step 2: Generating AI response...');
-      final aiResponse = await _generateAIResponse(userText);
-      _lastAIResponse = aiResponse;
-      print('💭 AI response: $aiResponse');
-
-      // 3. TTS: Converter resposta em áudio e reproduzir
-      print('🔊 Step 3: Speaking response...');
-      _isSpeaking = true;
-
-      try {
-        await _ttsService.speak(aiResponse, voiceName: 'Zephyr');
-
-        // Aguardar um pouco após terminar de falar
-        await Future.delayed(const Duration(milliseconds: 500));
-      } finally {
-        _isSpeaking = false;
+      // Step 1: Speech-to-Text
+      final userText = await _transcribeAudio(audioBytes, mimeType);
+      
+      if (userText.isEmpty) {
+        _logger.warning('Empty transcription received');
+        throw Exception('No speech detected in audio');
       }
 
+      // Step 2: Generate AI Response
+      final aiResponse = await _generateAIResponse(userText);
+
+      // Step 3: Text-to-Speech
+      await _speakResponse(aiResponse);
+
+      timer.stop();
+      _logger.success('Voice interaction completed successfully');
+      
       return aiResponse;
 
-    } catch (e) {
-      print('❌ Error in voice chat: $e');
+    } catch (e, stackTrace) {
+      timer.stop();
+      _logger.error(
+        'Voice pipeline failed',
+        error: e,
+        stackTrace: stackTrace,
+      );
       rethrow;
     } finally {
       _isProcessing = false;
+      LogUtils.logStateChange('processing', 'idle', tag: 'VoiceChat');
     }
   }
 
-  /// Gera resposta da IA usando Gemini LLM
-  Future<String> _generateAIResponse(String userMessage) async {
-    if (!GeminiConfig.isInitialized) {
-      throw Exception('GeminiConfig not initialized');
-    }
-
-    try {
-      final model = GeminiConfig.model;
-
-      // Adicionar mensagem do usuário ao histórico
-      _conversationHistory.add(Content.text(userMessage));
-
-      // Gerar resposta
-      final response = await model.generateContent(_conversationHistory);
-
-      final aiText = response.text ?? 'Desculpe, não consegui gerar uma resposta.';
-
-      // Adicionar resposta da IA ao histórico
-      _conversationHistory.add(Content.model([TextPart(aiText)]));
-
-      return aiText;
-
-    } catch (e) {
-      print('Error generating AI response: $e');
-      return 'Desculpe, ocorreu um erro ao processar sua mensagem.';
-    }
-  }
-
-  /// Envia mensagem de texto (sem áudio) e recebe resposta falada
+  /// Send text message (skip STT, still use TTS for response)
+  ///
+  /// Useful for:
+  /// - Manual text input
+  /// - Replaying AI responses
+  /// - Testing without microphone
   Future<String> sendTextMessage(String message) async {
     if (_isProcessing) {
+      _logger.warning('Already processing - cannot send text message');
       throw Exception('Already processing a message');
     }
+
+    LogUtils.logVoiceFlowStart('Text Message Processing');
+    LogUtils.logUserAction('Sent text: "$message"');
+    
+    final timer = PerformanceTimer('Text Message Pipeline', logger: _logger);
 
     _isProcessing = true;
 
     try {
       _lastUserMessage = message;
-      print('📝 User text: $message');
 
-      // Gerar resposta da IA
-      print('🤖 Generating AI response...');
       final aiResponse = await _generateAIResponse(message);
-      _lastAIResponse = aiResponse;
-      print('💭 AI response: $aiResponse');
+      await _speakResponse(aiResponse);
 
-      // Falar resposta
-      print('🔊 Speaking response...');
-      _isSpeaking = true;
-
-      try {
-        await _ttsService.speak(aiResponse, voiceName: 'Zephyr');
-
-        // Aguardar um pouco após terminar de falar
-        await Future.delayed(const Duration(milliseconds: 500));
-      } finally {
-        _isSpeaking = false;
-      }
+      timer.stop();
+      _logger.success('Text message processed successfully');
 
       return aiResponse;
 
-    } catch (e) {
-      print('❌ Error in text chat: $e');
+    } catch (e, stackTrace) {
+      timer.stop();
+      _logger.error(
+        'Text message pipeline failed',
+        error: e,
+        stackTrace: stackTrace,
+      );
       rethrow;
     } finally {
       _isProcessing = false;
     }
   }
 
-  /// Define o contexto/personalidade da IA
-  void setSystemContext(String context) {
-    _conversationHistory.clear();
+  // ============================================================================
+  // PRIVATE METHODS - Pipeline Steps
+  // ============================================================================
 
-    // Adicionar como system instruction (user + model response para simular)
-    _conversationHistory.add(Content.text(context));
-    _conversationHistory.add(Content.model([
-      TextPart('Entendido! Estou pronta para conversar como Lumi.')
-    ]));
+  /// Step 1: Convert audio to text using Gemini STT
+  Future<String> _transcribeAudio(Uint8List audioBytes, String mimeType) async {
+    _logger.info('━━━ Step 1/3: Speech-to-Text ━━━');
+    
+    final timer = PerformanceTimer('STT Transcription', logger: _logger);
+
+    try {
+      final userText = await _sttService.transcribe(audioBytes, mimeType: mimeType);
+      
+      _lastUserMessage = userText;
+      timer.stop();
+      
+      _logger.success('Transcribed: "$userText"');
+      
+      return userText;
+
+    } catch (e, stackTrace) {
+      timer.stop();
+      _logger.error(
+        'STT transcription failed',
+        error: e,
+        stackTrace: stackTrace,
+      );
+      rethrow;
+    }
   }
 
-  /// Limpa o histórico de conversação
+  /// Step 2: Generate AI response using Gemini LLM
+  Future<String> _generateAIResponse(String userMessage) async {
+    _logger.info('━━━ Step 2/3: LLM Response Generation ━━━');
+    
+    if (!GeminiConfig.isInitialized) {
+      _logger.error('GeminiConfig not initialized');
+      throw Exception('GeminiConfig not initialized');
+    }
+
+    final timer = PerformanceTimer('LLM Generation', logger: _logger);
+
+    try {
+      final model = GeminiConfig.model;
+
+      // Add user message to history
+      _conversationHistory.add(Content.text(userMessage));
+      _logger.debug('Conversation history size: ${_conversationHistory.length} messages');
+
+      // Generate response with conversation context
+      _logger.debug('Calling Gemini LLM...');
+      final response = await model.generateContent(_conversationHistory);
+
+      final aiText = response.text ?? _getDefaultErrorResponse();
+
+      // Add AI response to history
+      _conversationHistory.add(Content.model([TextPart(aiText)]));
+
+      _lastAIResponse = aiText;
+      timer.stop();
+      
+      _logger.success('AI Response: "$aiText"');
+
+      return aiText;
+
+    } catch (e, stackTrace) {
+      timer.stop();
+      _logger.error(
+        'LLM generation failed',
+        error: e,
+        stackTrace: stackTrace,
+      );
+      
+      // Return friendly error message to user
+      final errorResponse = _getDefaultErrorResponse();
+      _lastAIResponse = errorResponse;
+      return errorResponse;
+    }
+  }
+
+  /// Step 3: Convert text to speech and play
+  Future<void> _speakResponse(String text) async {
+    _logger.info('━━━ Step 3/3: Text-to-Speech ━━━');
+    
+    final timer = PerformanceTimer('TTS Playback', logger: _logger);
+
+    _isSpeaking = true;
+    LogUtils.logStateChange('not speaking', 'speaking', tag: 'VoiceChat');
+
+    try {
+      _logger.debug('Speaking: "$text"');
+      await _ttsService.speak(text, voiceName: AppConstants.defaultVoice);
+
+      // Small delay after speaking to ensure audio completes
+      await Future.delayed(const Duration(milliseconds: 500));
+
+      timer.stop();
+      _logger.success('TTS playback completed');
+
+    } catch (e, stackTrace) {
+      timer.stop();
+      _logger.error(
+        'TTS playback failed',
+        error: e,
+        stackTrace: stackTrace,
+      );
+      rethrow;
+    } finally {
+      _isSpeaking = false;
+      LogUtils.logStateChange('speaking', 'not speaking', tag: 'VoiceChat');
+    }
+  }
+
+  // ============================================================================
+  // CONFIGURATION & MANAGEMENT
+  // ============================================================================
+
+  /// Set AI personality and behavior
+  ///
+  /// This sets the system context that guides the AI's responses.
+  /// Should be called once during initialization.
+  void setSystemContext(String context) {
+    _logger.info('Setting system context');
+    
+    _conversationHistory.clear();
+
+    // Simulate system instruction using user + model pair
+    _conversationHistory.add(Content.text(context));
+    _conversationHistory.add(Content.model([
+      TextPart('Entendido! Estou pronta para conversar como ${AppConstants.aiName}.')
+    ]));
+
+    _logger.success('System context configured');
+    _logger.debug('Context: "$context"');
+  }
+
+  /// Clear conversation history
+  ///
+  /// Useful for:
+  /// - Starting fresh conversation
+  /// - Clearing context after error
+  /// - Reset button functionality
   void clearHistory() {
+    final previousCount = _conversationHistory.length;
+    
     _conversationHistory.clear();
     _lastUserMessage = null;
     _lastAIResponse = null;
+    
+    _logger.info('Conversation history cleared ($previousCount messages removed)');
   }
 
-  /// Para a reprodução de áudio atual
+  /// Stop current audio playback
   Future<void> stopSpeaking() async {
-    await _ttsService.stop();
+    if (_isSpeaking) {
+      _logger.info('Stopping current speech playback');
+      await _ttsService.stop();
+      _isSpeaking = false;
+      LogUtils.logStateChange('speaking', 'stopped', tag: 'VoiceChat');
+    }
   }
 
-  /// Limpa recursos
+  /// Get conversation summary for debugging
+  String getConversationSummary() {
+    final userMessages = _conversationHistory
+        .where((c) => c.role == 'user')
+        .length;
+    final modelMessages = _conversationHistory
+        .where((c) => c.role == 'model')
+        .length;
+
+    return 'Messages: $userMessages user, $modelMessages AI';
+  }
+
+  /// Log current state for debugging
+  void logDebugState() {
+    _logger.debug('═══ VoiceChat State ═══');
+    _logger.debug('Processing: $_isProcessing');
+    _logger.debug('Speaking: $_isSpeaking');
+    _logger.debug('Conversation: ${getConversationSummary()}');
+    _logger.debug('Last User: "$_lastUserMessage"');
+    _logger.debug('Last AI: "$_lastAIResponse"');
+  }
+
+  // ============================================================================
+  // HELPERS
+  // ============================================================================
+
+  String _getDefaultErrorResponse() {
+    return 'Desculpe, ocorreu um erro ao processar sua mensagem.';
+  }
+
+  /// Clean up resources
   void dispose() {
+    _logger.info('Disposing VoiceChatService');
+    
     _ttsService.dispose();
+    _conversationHistory.clear();
+    
+    _logger.success('VoiceChatService disposed');
   }
 }
