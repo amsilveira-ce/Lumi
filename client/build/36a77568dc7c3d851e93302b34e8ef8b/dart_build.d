@@ -1,0 +1,1 @@
+ /Users/amandasoaresdasilveira/Documents/Lumi/build/36a77568dc7c3d851e93302b34e8ef8b/dart_build_result.json:  /Users/amandasoaresdasilveira/Documents/Lumi/.dart_tool/package_config.json /Users/amandasoaresdasilveira/Documents/Lumi/pubspec.yaml /opt/homebrew/share/flutter/bin/cache/dart-sdk/version
