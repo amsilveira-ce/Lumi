@@ -1,0 +1,23 @@
+# GrandCompanion Backend Requirements
+# Python 3.11+
+
+# A2A Protocol - Agent-to-Agent Communication
+a2a>=0.3.0
+
+# LLM Interface
+litellm>=1.0.0
+ollama>=0.1.0
+
+# Google Agent Development Kit
+google-adk>=0.1.0
+
+# ASGI Server
+uvicorn>=0.27.0
+starlette>=0.36.0
+
+# HTTP Client
+httpx>=0.26.0
+
+# Utilities
+python-dotenv>=1.0.0
+pydantic>=2.5.0
