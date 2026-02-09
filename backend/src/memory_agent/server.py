@@ -245,7 +245,7 @@ def get_agent_card(host: str = "0.0.0.0", port: int = 8083) -> AgentCard:
 def main():
     """Starts the Memory Agent Server on port 8083."""
     host = "0.0.0.0"
-    port = int(os.environ.get("PORT", 8083))
+    port = int(os.environ.get("MEMORY_PORT", 8083))
 
     logger.info(f"🚀 Starting Memory Agent on {host}:{port}")
 

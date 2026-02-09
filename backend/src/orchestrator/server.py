@@ -191,13 +191,15 @@ class OrchestratorExecutor(AgentExecutor):
                     user_id, message, safety_result, elder_profile, full_context
                 )
             else:
-                # SAFE: Route to conversation agent
+                # SAFE: Route to appropriate handler
                 if action == "conversation":
                     response = await self.handle_conversation(
                         user_id, message, elder_profile
                     )
                 elif action == "ui_feedback":
                     response = await self.handle_ui_feedback(request_data)
+                elif action in ["submit_step", "validate_field", "start_onboarding", "next_step", "previous_step"]:
+                    response = await self.handle_onboarding(request_data, user_id)
                 else:
                     response = {
                         "text": "I'm not sure how to help with that.",
@@ -400,16 +402,146 @@ class OrchestratorExecutor(AgentExecutor):
         )
 
         # ════════════════════════════════════════════════════════════
-        # STEP 3: DETERMINE WIDGETS (using message + context)
+        # STEP 3: EXTRACT STRUCTURED DATA from conversation
         # ════════════════════════════════════════════════════════════
-        ui_commands = self.determine_widgets(message, full_context)
+        conversation_data = self.extract_conversation_data(message, full_context)
 
         # ════════════════════════════════════════════════════════════
-        # STEP 4: UPDATE CONTEXT with new turn
+        # STEP 3.5: SAVE TO GOOGLE CALENDAR if appointments detected
+        # ════════════════════════════════════════════════════════════
+        if conversation_data.get("appointments"):
+            asyncio.create_task(self.save_to_calendar(conversation_data["appointments"], user_id))
+
+        # ════════════════════════════════════════════════════════════
+        # STEP 4: DETERMINE WIDGETS (using message + context + extracted data)
+        # ════════════════════════════════════════════════════════════
+        ui_commands = self.determine_widgets(message, full_context, conversation_data)
+
+        # ════════════════════════════════════════════════════════════
+        # STEP 5: UPDATE CONTEXT with new turn
         # ════════════════════════════════════════════════════════════
         asyncio.create_task(self.update_context_turn(user_id, message, response_text))
 
         return {"text": response_text, "ui_commands": ui_commands}
+
+    def extract_conversation_data(self, message: str, full_context: dict = None) -> dict:
+        """
+        Extracts structured data from conversation (appointments, reminders, etc).
+
+        Uses AI to intelligently parse user messages and conversation history
+        to extract actionable information like dates, times, and event details.
+
+        Returns:
+            dict: Structured data extracted from conversation
+        """
+        import google.generativeai as genai
+        from datetime import datetime, timedelta
+
+        try:
+            # Get recent conversation history
+            conversation_history = []
+            if full_context and full_context.get("conversation_history"):
+                conversation_history = full_context["conversation_history"][-5:]
+
+            # Build conversation context
+            history_text = "\n".join([
+                f"{turn['role'].upper()}: {turn['content']}"
+                for turn in conversation_history
+            ])
+            history_text += f"\nUSER: {message}"
+
+            model = genai.GenerativeModel(os.environ.get("GEMINI_MODEL", "gemini-2.0-flash-exp"))
+
+            prompt = (
+                f"You are a data extraction assistant. Analyze this conversation and extract structured information.\n\n"
+                f"Conversation:\n{history_text}\n\n"
+                f"Extract any appointments, reminders, tasks, or scheduled events mentioned.\n"
+                f"Current date/time: {datetime.now().isoformat()}\n\n"
+                f"Return ONLY a JSON object with this structure:\n"
+                f"{{\n"
+                f'  "appointments": [{{"title": "string", "date": "YYYY-MM-DD", "time": "HH:MM", "type": "appointment|medication|task"}}],\n'
+                f'  "has_scheduling_intent": boolean\n'
+                f"}}\n\n"
+                f"If no actionable information found, return: {{'appointments': [], 'has_scheduling_intent': false}}"
+            )
+
+            response = model.generate_content(
+                prompt,
+                generation_config=genai.types.GenerationConfig(
+                    temperature=0.2,
+                    max_output_tokens=300,
+                )
+            )
+
+            # Parse response
+            response_text = response.text.strip()
+            if "```json" in response_text:
+                response_text = response_text.split("```json")[1].split("```")[0].strip()
+            elif "```" in response_text:
+                response_text = response_text.split("```")[1].split("```")[0].strip()
+
+            extracted_data = json.loads(response_text)
+
+            if extracted_data.get("appointments"):
+                logger.info(f"📅 [ORCHESTRATOR] Extracted {len(extracted_data['appointments'])} appointments from conversation")
+
+            return extracted_data
+
+        except Exception as e:
+            logger.error(f"Failed to extract conversation data: {e}")
+            return {"appointments": [], "has_scheduling_intent": False}
+
+    async def save_to_calendar(self, appointments: list, user_id: str):
+        """
+        Saves extracted appointments to Google Calendar.
+
+        This is called asynchronously after detecting scheduling intent in conversation.
+        """
+        from datetime import datetime, timedelta
+        import sys
+        sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
+        from google_calendar_integration import get_calendar_service
+
+        try:
+            calendar_service = get_calendar_service(user_id)
+
+            if not calendar_service.is_connected():
+                logger.info(f"📅 [CALENDAR] Not connected - events will be stored locally only")
+                return
+
+            for appointment in appointments:
+                title = appointment.get("title", "Scheduled event")
+                date_str = appointment.get("date")
+                time_str = appointment.get("time")
+
+                # Parse date and time
+                if date_str and time_str:
+                    # Combine date and time
+                    start_datetime_str = f"{date_str}T{time_str}:00"
+                elif date_str:
+                    # Date only - default to 9 AM
+                    start_datetime_str = f"{date_str}T09:00:00"
+                else:
+                    # No date - skip
+                    logger.warning(f"⚠️ [CALENDAR] Skipping appointment without date: {title}")
+                    continue
+
+                # Save to Google Calendar
+                result = await calendar_service.add_event(
+                    title=title,
+                    start_time=start_datetime_str,
+                    description=f"Created from conversation with Lumi",
+                    reminder_minutes=30
+                )
+
+                if result.get("status") == "success":
+                    logger.info(f"✅ [CALENDAR] Saved to Google Calendar: {title} at {start_datetime_str}")
+                    logger.info(f"📎 [CALENDAR] Link: {result.get('link')}")
+                else:
+                    logger.error(f"❌ [CALENDAR] Failed to save: {result.get('message')}")
+
+        except Exception as e:
+            logger.error(f"❌ [CALENDAR] Error saving to calendar: {e}")
 
     async def update_context_turn(
         self, user_id: str, user_message: str, assistant_message: str, risk_assessment: dict = None
@@ -431,46 +563,24 @@ class OrchestratorExecutor(AgentExecutor):
         await call_a2a_agent(self.MEMORY_AGENT_URL, update_payload)
         logger.info(f"💾 [ORCHESTRATOR] Updated context turn for user {user_id}")
 
-    async def get_memory_context(self, user_id: str, query: str) -> str:
+    def determine_widgets(self, message: str, full_context: dict = None, conversation_data: dict = None) -> list:
         """
-        LEGACY METHOD (for backward compatibility).
+        Uses AI to analyze message and context to determine which UI widgets to show.
 
-        Retrieves relevant memories from Memory Agent.
-        Now uses get_history under the hood.
+        This provides intelligent, context-aware widget selection based on:
+        - User's actual intent (not just keywords)
+        - Conversation context and history
+        - User's emotional state
+        - Active topics
+        - Extracted conversation data (appointments, reminders, etc)
         """
-        memory_payload = json.dumps(
-            {"action": "retrieve", "user_id": user_id, "query": query}
-        )
-        result = await call_a2a_agent(self.MEMORY_AGENT_URL, memory_payload)
-        return result.get("response_text", "")
+        import google.generativeai as genai
 
-    async def save_memory(self, user_id: str, user_message: str, bot_response: str):
-        """
-        LEGACY METHOD (for backward compatibility).
-
-        Saves conversation to Memory Agent.
-        Now uses update_turn under the hood.
-        """
-        memory_data = f"User: {user_message}\nAssistant: {bot_response}"
-        memory_payload = json.dumps(
-            {"action": "store", "user_id": user_id, "data": memory_data}
-        )
-        await call_a2a_agent(self.MEMORY_AGENT_URL, memory_payload)
-        logger.info(f"💾 [ORCHESTRATOR] Saved memory for user {user_id} (legacy method)")
-
-    def determine_widgets(self, message: str, full_context: dict = None) -> list:
-        """
-        Analyzes message to determine which UI widgets to show.
-
-        Uses:
-        - Message keywords
-        - Active topics from context (if available)
-        - User state from context (if available)
-
-        This enables context-aware widget selection!
-        """
-        message_lower = message.lower()
         commands = []
+
+        # Initialize conversation_data if None
+        if conversation_data is None:
+            conversation_data = {"appointments": [], "has_scheduling_intent": False}
 
         # Extract context information if available
         active_topics = {}
@@ -479,88 +589,132 @@ class OrchestratorExecutor(AgentExecutor):
             active_topics = full_context.get("active_topics", {})
             current_state = full_context.get("current_state", {})
 
-        # Mood-related keywords
-        mood_keywords = [
-            "feel",
-            "sad",
-            "happy",
-            "anxious",
-            "lonely",
-            "worried",
-            "scared",
-            "excited",
-            "tired",
-        ]
-        if any(word in message_lower for word in mood_keywords):
-            commands.append(
-                {
-                    "action": "show",
-                    "component": "MoodSelector",
-                    "props": {"widget_id": f"mood_{int(asyncio.get_event_loop().time())}"},
-                }
+        # Build context for AI
+        context_str = f"User message: {message}\n"
+        if current_state:
+            context_str += f"User emotional state: {current_state.get('emotional_state', 'neutral')}\n"
+            context_str += f"User cognitive clarity: {current_state.get('cognitive_clarity', 'clear')}\n"
+        if active_topics and active_topics.get('primary'):
+            context_str += f"Current topic: {active_topics['primary'].get('topic', 'general')}\n"
+
+        # Available widgets with descriptions
+        widgets_info = """
+Available widgets:
+1. MoodSelector - For tracking emotional state (use when user expresses feelings)
+2. ActivitySuggestions - For suggesting activities (use when user is bored or asks what to do)
+3. ReminderList - For managing reminders and appointments (use when user mentions schedules, medicine, appointments)
+4. ContactSelector - For calling people (use when user wants to contact someone)
+"""
+
+        try:
+            model = genai.GenerativeModel(os.environ.get("GEMINI_MODEL", "gemini-2.0-flash-exp"))
+
+            prompt = (
+                f"You are an AI assistant analyzing user intent to determine which UI widgets to show.\n\n"
+                f"{context_str}\n"
+                f"{widgets_info}\n"
+                f"Analyze the user's message and context to determine which widgets would be most helpful.\n"
+                f"Return ONLY a JSON object. Example:\n"
+                f'{{"widgets": ["ReminderList", "ContactSelector"], "contact_target": "doctor"}}\n\n'
+                f"If no widgets are needed, return: {{'widgets': []}}\n"
+                f"Important: For contact-related requests, identify WHO they want to contact in contact_target field."
             )
 
-        # Activity-related keywords
-        activity_keywords = ["bored", "do", "activity", "something", "nothing", "idle"]
-        if any(word in message_lower for word in activity_keywords):
-            commands.append(
-                {
-                    "action": "show",
-                    "component": "ActivitySuggestions",
-                    "props": {
-                        "widget_id": f"activity_{int(asyncio.get_event_loop().time())}"
-                    },
-                }
+            response = model.generate_content(
+                prompt,
+                generation_config=genai.types.GenerationConfig(
+                    temperature=0.3,
+                    max_output_tokens=200,
+                )
             )
 
-        # Reminder-related keywords
-        reminder_keywords = [
-            "remind",
-            "medication",
-            "pill",
-            "doctor",
-            "appointment",
-            "schedule",
-            "task",
-        ]
-        if any(word in message_lower for word in reminder_keywords):
-            commands.append(
-                {
+            # Parse AI response
+            response_text = response.text.strip()
+            # Remove markdown code blocks if present
+            if "```json" in response_text:
+                response_text = response_text.split("```json")[1].split("```")[0].strip()
+            elif "```" in response_text:
+                response_text = response_text.split("```")[1].split("```")[0].strip()
+
+            widget_decision = json.loads(response_text)
+            widgets_to_show = widget_decision.get("widgets", [])
+            contact_target = widget_decision.get("contact_target")
+
+            # Generate UI commands based on AI decision
+            timestamp = int(asyncio.get_event_loop().time())
+
+            for widget_name in widgets_to_show:
+                if widget_name == "MoodSelector":
+                    commands.append({
+                        "action": "show",
+                        "component": "MoodSelector",
+                        "props": {"widget_id": f"mood_{timestamp}"}
+                    })
+                elif widget_name == "ActivitySuggestions":
+                    commands.append({
+                        "action": "show",
+                        "component": "ActivitySuggestions",
+                        "props": {"widget_id": f"activity_{timestamp}"}
+                    })
+                elif widget_name == "ReminderList":
+                    # Convert extracted appointments to reminders format
+                    reminders = []
+                    for idx, apt in enumerate(conversation_data.get("appointments", [])):
+                        reminders.append({
+                            "id": f"extracted_{timestamp}_{idx}",
+                            "title": apt.get("title", "Scheduled event"),
+                            "time": apt.get("time", "TBD"),
+                            "completed": False,
+                            "type": apt.get("type", "appointment")
+                        })
+
+                    commands.append({
+                        "action": "show",
+                        "component": "ReminderList",
+                        "props": {
+                            "widget_id": f"reminder_{timestamp}",
+                            "reminders": reminders if reminders else None
+                        }
+                    })
+                elif widget_name == "ContactSelector":
+                    commands.append({
+                        "action": "show",
+                        "component": "ContactSelector",
+                        "props": {
+                            "widget_id": f"contact_{timestamp}",
+                            "requested_contact": contact_target or "someone",
+                            "message": message
+                        }
+                    })
+
+            logger.info(f"🎨 [ORCHESTRATOR] AI-generated UI: {widgets_to_show}")
+
+        except Exception as e:
+            logger.error(f"Failed to generate UI with AI: {e}")
+            # Fallback: use simple keyword matching
+            message_lower = message.lower()
+            if any(word in message_lower for word in ["doctor", "appointment", "remind", "medicine"]):
+                timestamp = int(asyncio.get_event_loop().time())
+
+                # Still try to use extracted conversation data
+                reminders = []
+                for idx, apt in enumerate(conversation_data.get("appointments", [])):
+                    reminders.append({
+                        "id": f"fallback_{timestamp}_{idx}",
+                        "title": apt.get("title", "Scheduled event"),
+                        "time": apt.get("time", "TBD"),
+                        "completed": False,
+                        "type": apt.get("type", "appointment")
+                    })
+
+                commands.append({
                     "action": "show",
                     "component": "ReminderList",
                     "props": {
-                        "widget_id": f"reminder_{int(asyncio.get_event_loop().time())}"
-                    },
-                }
-            )
-
-        # Contact/Call-related keywords
-        contact_keywords = ["call", "contact", "phone", "talk to", "reach", "speak to", "get in touch"]
-        person_keywords = ["son", "daughter", "family", "doctor", "friend", "grandson", "granddaughter", "caregiver", "someone"]
-
-        # Check if user wants to contact someone
-        has_contact_intent = any(word in message_lower for word in contact_keywords)
-        mentions_person = any(word in message_lower for word in person_keywords)
-
-        if has_contact_intent or (mentions_person and ("need" in message_lower or "want" in message_lower)):
-            # Extract who they want to contact (basic pattern matching)
-            contact_target = "someone"
-            for person in person_keywords:
-                if person in message_lower:
-                    contact_target = person
-                    break
-
-            commands.append(
-                {
-                    "action": "show",
-                    "component": "ContactSelector",
-                    "props": {
-                        "widget_id": f"contact_{int(asyncio.get_event_loop().time())}",
-                        "requested_contact": contact_target,
-                        "message": message  # Pass original message for context
-                    },
-                }
-            )
+                        "widget_id": f"reminder_{timestamp}",
+                        "reminders": reminders if reminders else None
+                    }
+                })
 
         return commands
 
@@ -589,6 +743,188 @@ class OrchestratorExecutor(AgentExecutor):
                 {"action": "update_ui_settings", "component": "App", "props": ui_settings}
             ],
         }
+
+    async def handle_onboarding(self, request_data: dict, user_id: str) -> dict:
+        """
+        Handles onboarding flow actions with AI-assisted guidance.
+
+        The AI provides:
+        - Empathetic guidance messages
+        - Validation feedback
+        - Personalized responses based on user input
+        - Navigation decisions
+        """
+        action = request_data.get("action", "")
+        data = request_data.get("data", {})
+
+        logger.info(f"🎓 [ORCHESTRATOR] Onboarding action: {action}, data: {data}")
+
+        # Define step sequence
+        step_sequence = [
+            'welcome',
+            'cognitive_comfort',
+            'personality_traits',
+            'tone_preferences',
+            'emergency_contacts',
+            'daily_routines',
+            'basic_info',
+            'preferences',
+            'goals',
+            'complete'
+        ]
+
+        # Get current step from data
+        current_step = data.get("current_step", "welcome")
+        step_data = data.get("step_data", {})
+
+        # Calculate progress
+        try:
+            current_index = step_sequence.index(current_step)
+        except ValueError:
+            current_index = 0
+            current_step = "welcome"
+
+        progress = int(((current_index + 1) / len(step_sequence)) * 100)
+
+        # Handle different actions
+        if action == "submit_step":
+            # Use AI to generate encouraging feedback
+            import google.generativeai as genai
+
+            try:
+                model = genai.GenerativeModel(os.environ.get("GEMINI_MODEL", "gemini-2.0-flash-exp"))
+
+                # Create context about what was just submitted
+                step_context = f"User just completed the '{current_step}' step with data: {json.dumps(step_data)}"
+
+                prompt = (
+                    f"You are a warm, supportive AI assistant helping an elderly person set up their care companion app.\n\n"
+                    f"{step_context}\n\n"
+                    f"Provide a brief (1-2 sentences), encouraging response that:\n"
+                    f"1. Acknowledges what they shared\n"
+                    f"2. Motivates them to continue\n"
+                    f"3. Is warm and personal\n\n"
+                    f"Keep it conversational and supportive."
+                )
+
+                response = model.generate_content(
+                    prompt,
+                    generation_config=genai.types.GenerationConfig(
+                        temperature=0.8,
+                        max_output_tokens=100,
+                    )
+                )
+
+                ai_message = response.text.strip()
+            except Exception as e:
+                logger.error(f"Gemini call failed in onboarding: {e}")
+                ai_message = "Thank you for sharing that with me. Let's continue!"
+
+            # Determine next step
+            next_index = current_index + 1
+            if next_index < len(step_sequence):
+                next_step = step_sequence[next_index]
+                is_complete = False
+            else:
+                next_step = "complete"
+                is_complete = True
+
+            next_progress = int(((next_index + 1) / len(step_sequence)) * 100)
+
+            return {
+                "text": ai_message,
+                "ui_commands": [
+                    {
+                        "action": "navigate",
+                        "component": "OnboardingFlow",
+                        "props": {
+                            "next_step": next_step
+                        }
+                    }
+                ],
+                "onboarding_state": {
+                    "current_step": next_index,
+                    "step_name": next_step,
+                    "progress": next_progress,
+                    "is_complete": is_complete
+                }
+            }
+
+        elif action == "validate_field":
+            # AI-powered field validation with helpful feedback
+            field_name = data.get("field", "")
+            field_value = data.get("value", "")
+
+            # Basic validation
+            is_valid = bool(field_value and str(field_value).strip())
+
+            if is_valid:
+                return {
+                    "text": "",
+                    "ui_commands": [
+                        {
+                            "action": "validate",
+                            "component": "Field",
+                            "props": {
+                                "field": field_name,
+                                "is_valid": True,
+                                "message": ""
+                            }
+                        }
+                    ],
+                    "onboarding_state": {
+                        "current_step": current_index,
+                        "step_name": current_step,
+                        "progress": progress,
+                        "is_complete": False
+                    }
+                }
+            else:
+                return {
+                    "text": "",
+                    "ui_commands": [
+                        {
+                            "action": "validate",
+                            "component": "Field",
+                            "props": {
+                                "field": field_name,
+                                "is_valid": False,
+                                "message": "This field is required"
+                            }
+                        }
+                    ],
+                    "onboarding_state": {
+                        "current_step": current_index,
+                        "step_name": current_step,
+                        "progress": progress,
+                        "is_complete": False
+                    }
+                }
+
+        elif action == "start_onboarding":
+            return {
+                "text": "Welcome to Lumi! I'm so glad you're here. Let's get to know each other better so I can provide you with the best care and companionship.",
+                "ui_commands": [],
+                "onboarding_state": {
+                    "current_step": 0,
+                    "step_name": "welcome",
+                    "progress": int((1 / len(step_sequence)) * 100),
+                    "is_complete": False
+                }
+            }
+
+        else:
+            # Default response for other onboarding actions
+            return {
+                "text": "Let's continue with your setup.",
+                "ui_commands": [],
+                "onboarding_state": {
+                    "current_step": current_index,
+                    "step_name": current_step,
+                    "progress": progress,
+                    "is_complete": False
+                }
+            }
 
     async def cancel(self, context: RequestContext, event_queue: EventQueue) -> None:
         """Cancel execution - not supported"""
@@ -685,7 +1021,7 @@ def main():
     This is the main entry point that the React Dashboard connects to.
     """
     host = "0.0.0.0"
-    port = int(os.environ.get("PORT", 8082))
+    port = int(os.environ.get("ORCHESTRATOR_PORT", 8082))
 
     logger.info(f"🚀 Starting GrandCompanion Orchestrator on {host}:{port}")
     logger.info(f"📡 Safety Agent: {OrchestratorExecutor.SAFETY_AGENT_URL}")

@@ -3,7 +3,7 @@ import logging
 import uvicorn
 import json
 import os
-import requests
+import google.generativeai as genai
 from a2a.utils.errors import ServerError
 from a2a.server.apps import A2AStarletteApplication
 from a2a.server.request_handlers import DefaultRequestHandler
@@ -11,15 +11,21 @@ from a2a.server.tasks import InMemoryTaskStore
 from a2a.server.agent_execution import AgentExecutor, RequestContext
 from a2a.server.events import EventQueue
 from a2a.types import AgentCard, AgentSkill, AgentCapabilities, TaskState
-from a2a.utils import new_task, completed_task, new_artifact, new_agent_text_message
-from a2a.types import Part, TextPart,UnsupportedOperationError
+from a2a.utils import new_task, completed_task, new_artifact
+from a2a.types import Part, TextPart, UnsupportedOperationError
 from a2a.server.tasks import TaskUpdater
-
-
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("ConversationAgent")
+
+# Configure Gemini
+GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY")
+if GEMINI_API_KEY:
+    genai.configure(api_key=GEMINI_API_KEY)
+    logger.info("✅ Gemini API configured")
+else:
+    logger.warning("⚠️ GEMINI_API_KEY not set - Gemini will not work")
 
 class ConversationExecutor(AgentExecutor):
     async def execute(self, context: RequestContext, event_queue: EventQueue) -> None:
@@ -39,12 +45,9 @@ class ConversationExecutor(AgentExecutor):
             user_input = context.get_user_input()
             logger.info(f"📨 Received: {user_input}")
 
-            # 2. Generate Response (Mocked LLM for testing simplicity)
-            # In production, replace this function with a call to Gemini
+            # 2. Generate Response
             response_text = self.generate_llm_response(user_input)
-            
 
-            
             # 3. Send Completion
             logger.info(f"📤 Sending: {response_text}")
             completed = completed_task(
@@ -67,14 +70,27 @@ class ConversationExecutor(AgentExecutor):
 
     def generate_llm_response(self, input_json: str) -> str:
         """
-        Generates a response via a local Ollama model.
+        Generates a response via Google Gemini.
         """
         try:
             # The Orchestrator sends JSON with 'user_text', 'memory_context', etc.
             data = json.loads(input_json)
             user_text = data.get("user_text", "")
             memory = data.get("memory_context", "")
-            
+            topic_context = data.get("topic_context", "")
+            state_context = data.get("state_context", "")
+
+            # Build context-aware prompt
+            context_parts = []
+            if memory:
+                context_parts.append(f"Conversation history:\n{memory}")
+            if topic_context:
+                context_parts.append(f"{topic_context}")
+            if state_context:
+                context_parts.append(f"{state_context}")
+
+            context_str = "\n\n".join(context_parts) if context_parts else "(No prior conversation)"
+
             prompt = (
                 "You are a warm, empathetic companion for an older adult. "
                 "Your goal is to be helpful, accurate, and supportive.\n\n"
@@ -86,32 +102,31 @@ class ConversationExecutor(AgentExecutor):
                 "5. NEVER make up problems or topics the user didn't mention\n"
                 "6. Keep responses brief (1-3 sentences max)\n"
                 "7. Be warm but accurate - don't hallucinate details\n\n"
-                "Example:\n"
-                "User: 'I need to call my son'\n"
-                "Assistant: 'Of course! I'll help you call your son right away. You should see a contact list where you can reach him.'\n\n"
-                f"User: {user_text}\n"
-                f"Memory context: {memory}\n\n"
-                "Assistant:"
+                f"{context_str}\n\n"
+                f"User: {user_text}\n\n"
+                "Respond with warmth and empathy:"
             )
 
-            model = os.environ.get("OLLAMA_MODEL", "llama3.1:8b")
-            base_url = os.environ.get("OLLAMA_BASE_URL", "http://localhost:11434")
-            url = f"{base_url}/api/generate"
-            payload = {
-                "model": model,
-                "prompt": prompt,
-                "stream": False,
-            }
-            resp = requests.post(url, json=payload, timeout=30)
-            resp.raise_for_status()
-            data = resp.json()
-            return data.get("response", "").strip() or "[Warm Tone] I'm here with you."
+            # Use Gemini
+            model_name = os.environ.get("GEMINI_MODEL", "gemini-2.0-flash-exp")
+            model = genai.GenerativeModel(model_name)
+
+            response = model.generate_content(
+                prompt,
+                generation_config=genai.types.GenerationConfig(
+                    temperature=0.7,
+                    max_output_tokens=150,
+                )
+            )
+
+            return response.text.strip() or "I'm here with you. Tell me more."
+
         except json.JSONDecodeError:
             # Fallback if raw text is sent
-            return f"[Warm Tone] I hear you saying: {input_json}"
+            return f"I hear you saying: {input_json}"
         except Exception as e:
-            logger.error(f"Ollama call failed: {e}")
-            return "[Warm Tone] I'm here with you. Tell me more, dear."
+            logger.error(f"Gemini call failed: {e}")
+            return "I'm here with you. Tell me more, dear."
 
 def get_agent_card(host="0.0.0.0", port=8081):
     ''' Create agent card of the conversation Agent'''

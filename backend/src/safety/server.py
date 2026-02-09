@@ -1,14 +1,18 @@
-# (Imports same as your ingredientmatcheragent/agent_server.py)
 import logging
 import uvicorn
+import json
+import os
+import asyncio
+import datetime
+import litellm
 from a2a.server.apps import A2AStarletteApplication
 from a2a.server.request_handlers import DefaultRequestHandler
 from a2a.server.tasks import InMemoryTaskStore
-from a2a.utils import new_task, completed_task, new_artifact
+from a2a.utils import new_task, completed_task, new_artifact, new_agent_text_message
 from a2a.server.agent_execution import AgentExecutor, RequestContext
 from a2a.server.events import EventQueue
 from a2a.types import (
-    Part, 
+    Part,
     TextPart,
     AgentCapabilities,
     AgentCard,
@@ -17,20 +21,13 @@ from a2a.types import (
     UnsupportedOperationError,
 )
 from a2a.server.tasks import TaskUpdater
-from a2a.utils import new_agent_text_message, new_task
 from a2a.utils.errors import ServerError
-import json
-import grpc
-import os
-import asyncio
 from google.genai import types as genai_types
-from google.adk.agents import Agent 
+from google.adk.agents import Agent
 from google.adk.models.lite_llm import LiteLlm
 from google.adk.runners import Runner
-from google.adk.sessions import InMemorySessionService, Session
+from google.adk.sessions import InMemorySessionService
 from google.adk.memory import InMemoryMemoryService
-import datetime
-import litellm
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -153,9 +150,8 @@ OUTPUT FORMAT (JSON only):
 Respond ONLY with valid JSON. No additional text."""
 
     try:
-        # Use LiteLLM to call the model
-        model_name = os.environ.get("SAFETY_CLASSIFIER_MODEL", "ollama_chat/llama3.1:8b")
-        base_url = os.environ.get("OLLAMA_BASE_URL", "http://localhost:11434")
+        # Use LiteLLM to call Gemini
+        model_name = os.environ.get("SAFETY_CLASSIFIER_MODEL", "gemini/gemini-2.0-flash-exp")
 
         # Set litellm timeout to 15 seconds to prevent hanging
         litellm.set_verbose = False  # Reduce log noise
@@ -169,7 +165,6 @@ Respond ONLY with valid JSON. No additional text."""
             temperature=0.1,  # Low temperature for consistent classification
             max_tokens=300,
             timeout=15.0,  # 15 second timeout
-            base_url=base_url if "ollama" in model_name else None,
             drop_params=True  # Drop unsupported parameters instead of erroring
         )
 
@@ -363,7 +358,7 @@ def mark_user_safe(user_id: str, incident_id: str = None, confirmed_by: str = "u
     }
 
 
-def generate_emergency_report(incident_id: str, user_id: str, risk_classification: dict, actions_taken: list) -> dict:
+def generate_emergency_report(incident_id: str, user_id: str, risk_classification: dict, actions_taken: list[str]) -> dict:
     """
     Generates a structured incident report for audit and caregiver sharing.
 
@@ -371,7 +366,7 @@ def generate_emergency_report(incident_id: str, user_id: str, risk_classificatio
         incident_id (str): Unique incident identifier
         user_id (str): User involved
         risk_classification (dict): Output from analyze_safety_context
-        actions_taken (list): List of actions executed (e.g., ["emergency_call_placed", "caregiver_notified"])
+        actions_taken (list[str]): List of actions executed (e.g., ["emergency_call_placed", "caregiver_notified"])
 
     Returns:
         dict: Structured incident report
@@ -565,7 +560,7 @@ Respond ONLY with valid JSON."""
 
     try:
         response = litellm.completion(
-            model=os.environ.get("SAFETY_CLASSIFIER_MODEL", "ollama_chat/llama3.1:8b"),
+            model=os.environ.get("SAFETY_CLASSIFIER_MODEL", "gemini/gemini-2.0-flash-exp"),
             messages=[
                 {"role": "system", "content": "You are a crisis intervention specialist. Respond ONLY with JSON."},
                 {"role": "user", "content": intervention_prompt}
@@ -573,7 +568,6 @@ Respond ONLY with valid JSON."""
             temperature=0.7,  # Higher temperature for more empathetic, varied responses
             max_tokens=400,
             timeout=15.0,
-            base_url=os.environ.get("OLLAMA_BASE_URL", "http://localhost:11434") if "ollama" in os.environ.get("SAFETY_CLASSIFIER_MODEL", "ollama_chat/llama3.1:8b") else None,
             drop_params=True
         )
 
@@ -634,7 +628,7 @@ class ADKManager:
 
     def _initialize_runner(self):
         # Configuration
-        model_name = os.environ.get("SAFETY_MODEL", "ollama_chat/gpt-oss:20b")
+        model_name = os.environ.get("SAFETY_MODEL", "gemini/gemini-2.0-flash-exp")
         logger.info(f"🤖 Initializing ADK with model: {model_name}")
 
         # Define the Agent
@@ -992,7 +986,7 @@ def get_agent_card(host: str, port: int) -> AgentCard:
 def main():
     """Main entry point."""
     host = "0.0.0.0"
-    port = int(os.environ.get("PORT", 8080))
+    port = int(os.environ.get("SAFETY_PORT", 8080))
 
     logger.info(f"🚀 Starting Safety Agent on {host}:{port}")
 
